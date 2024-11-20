@@ -1,0 +1,113 @@
+name: Monitor Branch Protection Changes 4
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+
+jobs:
+  check-branch-protection:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check Branch Protection Rules
+        id: check-rules
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADMIN_PAT }}
+          script: |
+            const repo = context.repo;
+            
+            try {
+              // Get repository info
+              console.log('Getting repository info...');
+              const repoInfo = await github.rest.repos.get({
+                owner: repo.owner,
+                repo: repo.repo
+              });
+              
+              const defaultBranch = repoInfo.data.default_branch;
+              console.log(`Default branch is: ${defaultBranch}`);
+              
+              // Get current protection rules
+              console.log(`Checking protection rules for ${defaultBranch}...`);
+              const protection = await github.rest.repos.getBranchProtection({
+                owner: repo.owner,
+                repo: repo.repo,
+                branch: defaultBranch
+              });
+              
+              // Store the current state
+              const currentState = JSON.stringify(protection.data, null, 2);
+              console.log('Current protection rules:', currentState);
+              
+              // Set output for next step
+              core.setOutput('protection_rules', currentState);
+              
+              // Check if there's a previous state file
+              try {
+                const previousIssue = await github.rest.issues.listForRepo({
+                  owner: repo.owner,
+                  repo: repo.repo,
+                  state: 'open',
+                  labels: 'branch-protection-state',
+                  per_page: 1
+                });
+                
+                if (previousIssue.data.length > 0) {
+                  const previousState = previousIssue.data[0].body;
+                  if (previousState !== currentState) {
+                    core.setOutput('changes_detected', 'true');
+                    core.setOutput('previous_state', previousState);
+                  }
+                  // Close the previous state issue
+                  await github.rest.issues.update({
+                    owner: repo.owner,
+                    repo: repo.repo,
+                    issue_number: previousIssue.data[0].number,
+                    state: 'closed'
+                  });
+                }
+              } catch (e) {
+                console.log('No previous state found');
+              }
+              
+              // Create new state issue
+              await github.rest.issues.create({
+                owner: repo.owner,
+                repo: repo.repo,
+                title: '📝 Branch Protection State',
+                body: currentState,
+                labels: ['branch-protection-state']
+              });
+              
+            } catch (error) {
+              console.log('Error details:', error);
+              core.setFailed(`Error: ${error.message}`);
+            }
+
+      - name: Create Change Notification
+        if: steps.check-rules.outputs.changes_detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADMIN_PAT }}
+          script: |
+            const currentState = JSON.parse(process.env.STATE_CURRENT);
+            const previousState = JSON.parse(process.env.STATE_PREVIOUS);
+            
+            let changeDescription = '### Branch Protection Rules Changed\n\n';
+            changeDescription += 'Changes have been detected in the branch protection rules.\n\n';
+            changeDescription += '```diff\n';
+            changeDescription += `- Previous State:\n${JSON.stringify(previousState, null, 2)}\n`;
+            changeDescription += `+ Current State:\n${JSON.stringify(currentState, null, 2)}\n`;
+            changeDescription += '```';
+            
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ Branch Protection Rules Changed',
+              body: changeDescription,
+              labels: ['security']
+            });
+        env:
+          STATE_CURRENT: ${{ steps.check-rules.outputs.protection_rules }}
+          STATE_PREVIOUS: ${{ steps.check-rules.outputs.previous_state }}
