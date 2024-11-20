@@ -1,0 +1,194 @@
+name: Monitor Branch Protection Changes 5
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'  # Every 15 minutes
+  # Add monitoring of relevant events
+  repository_dispatch:
+    types: [branch_protection_check]
+  watch:
+    types: [started]  # Repository events
+  create:  # New branch created
+  delete:  # Branch deleted
+  branch_protection_rule:  # Direct branch protection changes (if supported by your GitHub version)
+
+jobs:
+  check-branch-protection:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check Branch Protection Rules
+        id: check-rules
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADMIN_PAT }}
+          script: |
+            const repo = context.repo;
+            
+            async function getAuditLog() {
+              try {
+                // Get recent repository events
+                const events = await github.rest.activity.listRepoEvents({
+                  owner: repo.owner,
+                  repo: repo.repo
+                });
+                
+                return events.data
+                  .filter(event => 
+                    event.type === 'RepositoryRulesetEvent' ||
+                    event.type === 'BranchProtectionRuleEvent' ||
+                    (event.type === 'PushEvent' && event.payload.ref.startsWith('refs/heads/'))
+                  )
+                  .map(event => ({
+                    type: event.type,
+                    actor: event.actor.login,
+                    created_at: event.created_at,
+                    details: event.payload
+                  }));
+              } catch (error) {
+                console.log('Error fetching audit log:', error);
+                return [];
+              }
+            }
+
+            try {
+              // Get repository info
+              console.log('Getting repository info...');
+              const repoInfo = await github.rest.repos.get({
+                owner: repo.owner,
+                repo: repo.repo
+              });
+              
+              const defaultBranch = repoInfo.data.default_branch;
+              console.log(`Default branch is: ${defaultBranch}`);
+              
+              // Get current protection rules
+              console.log(`Checking protection rules for ${defaultBranch}...`);
+              const protection = await github.rest.repos.getBranchProtection({
+                owner: repo.owner,
+                repo: repo.repo,
+                branch: defaultBranch
+              });
+              
+              // Get recent events
+              const recentEvents = await getAuditLog();
+              
+              // Store the current state with timestamp and events
+              const currentState = {
+                timestamp: new Date().toISOString(),
+                protection_rules: protection.data,
+                recent_events: recentEvents
+              };
+              
+              console.log('Current state:', JSON.stringify(currentState, null, 2));
+              core.setOutput('current_state', JSON.stringify(currentState));
+              
+              // Get previous state
+              try {
+                const previousIssues = await github.rest.issues.listForRepo({
+                  owner: repo.owner,
+                  repo: repo.repo,
+                  state: 'open',
+                  labels: 'branch-protection-state',
+                  per_page: 5,
+                  sort: 'created',
+                  direction: 'desc'
+                });
+                
+                if (previousIssues.data.length > 0) {
+                  const previousStates = previousIssues.data
+                    .map(issue => {
+                      try {
+                        return JSON.parse(issue.body);
+                      } catch (e) {
+                        return null;
+                      }
+                    })
+                    .filter(state => state !== null);
+                  
+                  if (previousStates.length > 0) {
+                    // Compare with all recent states
+                    const changes = previousStates.map(prevState => ({
+                      timestamp: prevState.timestamp,
+                      changed: JSON.stringify(prevState.protection_rules) !== JSON.stringify(protection.data)
+                    }));
+                    
+                    if (changes.some(change => change.changed)) {
+                      core.setOutput('changes_detected', 'true');
+                      core.setOutput('previous_states', JSON.stringify(previousStates));
+                    }
+                  }
+                  
+                  // Close previous state issues
+                  for (const issue of previousIssues.data) {
+                    await github.rest.issues.update({
+                      owner: repo.owner,
+                      repo: repo.repo,
+                      issue_number: issue.number,
+                      state: 'closed'
+                    });
+                  }
+                }
+              } catch (e) {
+                console.log('Error handling previous states:', e);
+              }
+              
+              // Create new state issue
+              await github.rest.issues.create({
+                owner: repo.owner,
+                repo: repo.repo,
+                title: `📝 Branch Protection State ${new Date().toISOString()}`,
+                body: JSON.stringify(currentState, null, 2),
+                labels: ['branch-protection-state']
+              });
+              
+            } catch (error) {
+              console.log('Error details:', error);
+              core.setFailed(`Error: ${error.message}`);
+            }
+
+      - name: Create Change Notification
+        if: steps.check-rules.outputs.changes_detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADMIN_PAT }}
+          script: |
+            const currentState = JSON.parse(process.env.STATE_CURRENT);
+            const previousStates = JSON.parse(process.env.STATE_PREVIOUS);
+            
+            let changeDescription = '### 🚨 Branch Protection Rules Changed\n\n';
+            changeDescription += 'Changes have been detected in the branch protection rules.\n\n';
+            
+            // Add timeline of changes
+            changeDescription += '### Timeline\n';
+            for (const state of previousStates) {
+              changeDescription += `- ${state.timestamp}\n`;
+              changeDescription += '```json\n';
+              changeDescription += JSON.stringify(state.protection_rules, null, 2);
+              changeDescription += '\n```\n\n';
+            }
+            
+            // Add current state
+            changeDescription += '### Current State\n';
+            changeDescription += '```json\n';
+            changeDescription += JSON.stringify(currentState.protection_rules, null, 2);
+            changeDescription += '\n```\n\n';
+            
+            // Add recent events
+            if (currentState.recent_events?.length > 0) {
+              changeDescription += '### Recent Repository Events\n';
+              for (const event of currentState.recent_events) {
+                changeDescription += `- ${event.created_at}: ${event.type} by ${event.actor}\n`;
+              }
+            }
+            
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Branch Protection Rules Changed',
+              body: changeDescription,
+              labels: ['security', 'high-priority']
+            });
+        env:
+          STATE_CURRENT: ${{ steps.check-rules.outputs.current_state }}
+          STATE_PREVIOUS: ${{ steps.check-rules.outputs.previous_states }}
