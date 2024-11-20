@@ -1,0 +1,191 @@
+name: Monitor Branch Protection Changes 6
+on:
+  branch_protection_rule:
+    types: [created, edited, deleted]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check-branch-protection:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check Branch Protection Rules
+        id: check-rules
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADMIN_PAT }}
+          script: |
+            const repo = context.repo;
+            
+            try {
+              // Get repository info
+              console.log('Getting repository info...');
+              const repoInfo = await github.rest.repos.get({
+                owner: repo.owner,
+                repo: repo.repo
+              });
+              
+              const defaultBranch = repoInfo.data.default_branch;
+              console.log(`Default branch is: ${defaultBranch}`);
+              
+              // Get current protection rules
+              console.log(`Checking protection rules for ${defaultBranch}...`);
+              const protection = await github.rest.repos.getBranchProtection({
+                owner: repo.owner,
+                repo: repo.repo,
+                branch: defaultBranch
+              });
+              
+              const currentState = JSON.stringify(protection.data, null, 2);
+              console.log('Current protection rules:', currentState);
+              core.setOutput('protection_rules', currentState);
+              core.setOutput('repo_name', `${repo.owner}/${repo.repo}`);
+              
+              // Check for changes
+              const previousIssue = await github.rest.issues.listForRepo({
+                owner: repo.owner,
+                repo: repo.repo,
+                state: 'open',
+                labels: 'branch-protection-state',
+                per_page: 1
+              });
+              
+              if (previousIssue.data.length > 0) {
+                const previousState = previousIssue.data[0].body;
+                if (previousState !== currentState) {
+                  core.setOutput('changes_detected', 'true');
+                  core.setOutput('previous_state', previousState);
+                }
+              }
+              
+            } catch (error) {
+              console.log('Error details:', error);
+              core.setFailed(`Error: ${error.message}`);
+              core.setOutput('error_message', error.message);
+            }
+
+      - name: Send Slack Notification - Changes Detected
+        if: steps.check-rules.outputs.changes_detected == 'true'
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          channel-id: 'C081N38PHC5'
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🚨 Branch Protection Rules Changed in ${{ steps.check-rules.outputs.repo_name }}",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repository:*\n${{ github.repository }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Changed by:*\n${{ github.actor }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Event:*\n${{ github.event_name }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Time:*\n<!date^${{ github.event.timestamp }}^{date_short_pretty} at {time}|Now>"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Current Protection Rules:*\n```${{ steps.check-rules.outputs.protection_rules }}```"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Branch Settings",
+                        "emoji": true
+                      },
+                      "style": "primary",
+                      "url": "${{ github.server_url }}/${{ github.repository }}/settings/branches"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+      - name: Send Slack Notification - Error
+        if: failure()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          channel-id: 'YOUR_CHANNEL_ID'
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "⚠️ Branch Protection Monitor Error in ${{ steps.check-rules.outputs.repo_name }}",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repository:*\n${{ github.repository }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Error:*\n${{ steps.check-rules.outputs.error_message }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Workflow Run",
+                        "emoji": true
+                      },
+                      "style": "danger",
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
