@@ -148,18 +148,6 @@ jobs:
                     "text": "Branch protection rules have changed. Check repository settings for details."
                   }
                 }
-                     {
-                  "type": "actions",
-                  "elements": [
-                    {
-                      "type": "button",
-                      "text": {
-                        "type": "plain_text",
-                        "text": "View Workflow Details"
-                      },
-                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-                      "style": "danger"
-                    }
               ]
             }
 
