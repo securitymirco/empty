@@ -3,7 +3,7 @@ on:
   branch_protection_rule:
     types: [created, edited, deleted]
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
