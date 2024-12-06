@@ -1,4 +1,4 @@
-name: Monitor Branch Protection Changes 15
+name: Monitor Branch Protection Changes
 on:
   branch_protection_rule:
     types: [created, edited, deleted]
